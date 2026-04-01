@@ -18,8 +18,8 @@ const GRID_ROWS = 20
 const ISO_HW = 8   // half-width  → full diamond width  = 16px
 const ISO_HH = 4   // half-height → full diamond height =  8px
 // Origin: where col=0 row=0 top-vertex lands — right-edge of rightmost tile = 480 exactly
-const ISO_OX = 240  // LR_W / 2
-const ISO_OY = 14   // small top margin
+const ISO_OX = 200  // centers the 400px-wide grid diamond in 480px buffer
+const ISO_OY = 44   // vertically centers grid+entity height (218px) in 270px buffer
 
 // Tile intro wave
 const TILE_INTRO_DELAY = 0.03  // seconds per depth unit (max depth 48 → ~1.44s total)
@@ -530,7 +530,7 @@ export function Visualizer({
     particlesRef.current     = []
     cloudsRef.current        = Array.from({ length: 5 }, () => ({
       x:     Math.random() * LR_W,
-      y:     2 + Math.random() * (ISO_OY - 6),
+      y:     2 + Math.random() * Math.max(1, ISO_OY - 22),
       speed: 2 + Math.random() * 4,
     }))
 
@@ -550,7 +550,7 @@ export function Visualizer({
       return
     }
 
-    const scale = Math.max(1, Math.floor(Math.min(width / LR_W, height / LR_H)))
+    const scale = Math.max(1, Math.min(width / LR_W, height / LR_H))
     const drawW = LR_W * scale
     const drawH = LR_H * scale
     const drawX = Math.floor((width  - drawW) / 2)
@@ -845,7 +845,7 @@ export function Visualizer({
       oct.globalAlpha = 1
 
       // ---- Scale-blit to display canvas ----
-      ctx.fillStyle = '#000000'
+      ctx.fillStyle = '#080618'
       ctx.fillRect(0, 0, width, height)
       ctx.imageSmoothingEnabled = false
       ctx.drawImage(oc, drawX, drawY, drawW, drawH)
@@ -863,7 +863,7 @@ export function Visualizer({
         ref={canvasRef}
         width={width}
         height={height}
-        style={{ display: 'block' }}
+        style={{ display: 'block', imageRendering: 'pixelated' }}
       />
       {isActive && (
         <button
