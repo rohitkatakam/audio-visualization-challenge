@@ -21,6 +21,10 @@ const ISO_HH = 4   // half-height → full diamond height =  8px
 const ISO_OX = 240  // LR_W / 2
 const ISO_OY = 14   // small top margin
 
+// Tile intro wave
+const TILE_INTRO_DELAY = 0.03  // seconds per depth unit (max depth 48 → ~1.44s total)
+const TILE_INTRO_DUR   = 0.25  // fade-in duration per tile in seconds
+
 // Speech detection
 const GAIN         = 10.0
 const SILENCE_GATE = 0.012
@@ -194,6 +198,10 @@ function popScale(now: number, birthTime: number): number {
   return 1 - Math.exp(-4 * t) * Math.cos(8 * t)
 }
 
+function easeInQuad(t: number): number {
+  return t * t
+}
+
 // -------------------------------------------------------------------
 // Entity drawing — (sx, sy) is the top-vertex of the entity's tile
 // Entities are drawn upward from the tile's visual center
@@ -365,6 +373,20 @@ type ActiveDevelopment = {
   type: DevelopmentType
 }
 
+type Particle = {
+  x: number
+  y: number
+  vx: number
+  vy: number
+  life: number
+  maxLife: number
+  r: number
+  g: number
+  b: number
+}
+
+type Cloud = { x: number; y: number; speed: number }
+
 const DEVELOPMENT_TYPES: DevelopmentType[] = ['trees', 'mountain', 'flowers', 'water_spread', 'dark_grove']
 
 const DEV_CFG: Record<DevelopmentType, { maxRadius: number; spreadRate: number }> = {
@@ -373,6 +395,80 @@ const DEV_CFG: Record<DevelopmentType, { maxRadius: number; spreadRate: number }
   dark_grove:   { maxRadius: 5,  spreadRate: 1.1 },
   water_spread: { maxRadius: 8,  spreadRate: 0.4 },  // slow, deliberate flooding
   flowers:      { maxRadius: 3,  spreadRate: 0.9 },
+}
+
+// -------------------------------------------------------------------
+// World seeding — pre-populate a starter landscape
+// All entities get birthTime: Infinity (fixed up on first rAF frame)
+// -------------------------------------------------------------------
+
+function seedWorld(
+  tileMap: Uint8Array,
+  entities: Entity[],
+  occupied: Set<number>,
+) {
+  // --- Lake ---
+  const lakeCCol = 8  + Math.floor(Math.random() * 5)   // 8..12
+  const lakeCRow = 8  + Math.floor(Math.random() * 5)   // 8..12
+  const waterCells: [number, number][] = []
+  for (let dr = -2; dr <= 2; dr++) {
+    for (let dc = -2; dc <= 2; dc++) {
+      if (Math.abs(dr) + Math.abs(dc) <= 3) {
+        const r = lakeCRow + dr
+        const c = lakeCCol + dc
+        if (r >= 0 && r < GRID_ROWS && c >= 0 && c < GRID_COLS) {
+          const idx = r * GRID_COLS + c
+          if (!occupied.has(idx)) {
+            tileMap[idx] = TILE_WATER
+            waterCells.push([r, c])
+          }
+        }
+      }
+    }
+  }
+  // Sand border around water
+  for (const [wr, wc] of waterCells) {
+    const adj: [number, number][] = [[wr-1,wc],[wr+1,wc],[wr,wc-1],[wr,wc+1]]
+    for (const [nr, nc] of adj) {
+      if (nr >= 0 && nr < GRID_ROWS && nc >= 0 && nc < GRID_COLS) {
+        const nidx = nr * GRID_COLS + nc
+        if (tileMap[nidx] === TILE_GRASS) tileMap[nidx] = TILE_SAND
+      }
+    }
+  }
+
+  // --- Tree cluster ---
+  const treeCount = 4 + Math.floor(Math.random() * 3)   // 4..6
+  for (let i = 0; i < treeCount; i++) {
+    const c = 20 + Math.floor(Math.random() * 6)         // 20..25
+    const r =  5 + Math.floor(Math.random() * 6)         //  5..10
+    const idx = r * GRID_COLS + c
+    if (!occupied.has(idx) && tileMap[idx] !== TILE_WATER) {
+      entities.push({ col: c, row: r, kind: 'tree', birthTime: Infinity, variant: 0 })
+      occupied.add(idx)
+    }
+  }
+
+  // --- Mountain ---
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const c = 2 + Math.floor(Math.random() * (GRID_COLS - 6))
+    const r = 2 + Math.floor(Math.random() * (GRID_ROWS - 6))
+    if (c >= GRID_COLS - 2 || r >= GRID_ROWS - 2) continue
+    const fp1 =  r      * GRID_COLS +  c
+    const fp2 = (r + 1) * GRID_COLS +  c
+    const fp3 =  r      * GRID_COLS + (c + 1)
+    const fp4 = (r + 1) * GRID_COLS + (c + 1)
+    if (
+      !occupied.has(fp1) && !occupied.has(fp2) &&
+      !occupied.has(fp3) && !occupied.has(fp4) &&
+      tileMap[fp1] !== TILE_WATER && tileMap[fp2] !== TILE_WATER &&
+      tileMap[fp3] !== TILE_WATER && tileMap[fp4] !== TILE_WATER
+    ) {
+      entities.push({ col: c, row: r, kind: 'mountain', birthTime: Infinity, variant: 0 })
+      occupied.add(fp1); occupied.add(fp2); occupied.add(fp3); occupied.add(fp4)
+      break
+    }
+  }
 }
 
 // -------------------------------------------------------------------
@@ -398,6 +494,11 @@ export function Visualizer({
   const wavePhaseRef     = useRef(0)
   const simulatingRef    = useRef(false)
   const simPulseRef      = useRef({ speaking: false, timer: 0, rms: 0.35 })
+  const tileIntroRef     = useRef<Float32Array | null>(null)
+  const startTimeRef     = useRef(0)
+  const seededRef        = useRef(false)
+  const cloudsRef        = useRef<Cloud[]>([])
+  const particlesRef     = useRef<Particle[]>([])
   const [simulating, setSimulating] = useState(false)
 
   useEffect(() => {
@@ -423,6 +524,18 @@ export function Visualizer({
     wasSpeakingRef.current   = false
     lastTimestampRef.current = 0
     wavePhaseRef.current     = 0
+    tileIntroRef.current     = new Float32Array(GRID_COLS * GRID_ROWS)
+    startTimeRef.current     = 0
+    seededRef.current        = false
+    particlesRef.current     = []
+    cloudsRef.current        = Array.from({ length: 5 }, () => ({
+      x:     Math.random() * LR_W,
+      y:     2 + Math.random() * (ISO_OY - 6),
+      speed: 2 + Math.random() * 4,
+    }))
+
+    // Pre-seed the world
+    seedWorld(tileMapRef.current, entitiesRef.current, occupiedRef.current)
 
     if (!isActive) {
       ctx.fillStyle = PAL.inactiveBg
@@ -449,6 +562,21 @@ export function Visualizer({
         : Math.min((timestamp - lastTimestampRef.current) / 1000, 0.1)
       lastTimestampRef.current = timestamp
       const now = timestamp / 1000
+
+      // ---- First-frame setup ----
+      if (startTimeRef.current === 0) {
+        startTimeRef.current = now
+        const intro = tileIntroRef.current!
+        for (let r = 0; r < GRID_ROWS; r++)
+          for (let c = 0; c < GRID_COLS; c++)
+            intro[r * GRID_COLS + c] = now + (c + r) * TILE_INTRO_DELAY
+      }
+      if (!seededRef.current) {
+        seededRef.current = true
+        for (const e of entitiesRef.current)
+          if (e.birthTime === Infinity)
+            e.birthTime = now + (e.col + e.row) * TILE_INTRO_DELAY + 0.1
+      }
 
       // ---- Audio / simulation ----
       let gainedRms: number
@@ -569,6 +697,24 @@ export function Visualizer({
                 occupied.add( r      * GRID_COLS + (c + 1))
                 occupied.add((r + 1) * GRID_COLS + (c + 1))
               }
+
+              // Spawn sparkle particles
+              const [psx, psy] = isoSS(c, r)
+              let pr: number, pg: number, pb: number
+              if      (kind === 'tree')     { pr = 60;  pg = 160; pb = 40  }
+              else if (kind === 'mountain') { pr = 140; pg = 140; pb = 140 }
+              else if (kind === 'flower')   { pr = 220; pg = 190; pb = 50  }
+              else                          { pr = 50;  pg = 120; pb = 30  }
+              const pCount = 6 + Math.floor(Math.random() * 3)
+              for (let p = 0; p < pCount; p++) {
+                particlesRef.current.push({
+                  x: psx, y: psy + ISO_HH,
+                  vx: (Math.random() - 0.5) * 3.0,
+                  vy: -0.5 - Math.random() * 2.0,
+                  life: 0.5, maxLife: 0.5,
+                  r: pr, g: pg, b: pb,
+                })
+              }
             }
           }
         }
@@ -577,10 +723,35 @@ export function Visualizer({
       wavePhaseRef.current = (wavePhaseRef.current + dt * 1.5) % 1.0
       const wavePhase = wavePhaseRef.current
 
-      // ---- Draw: tiles + entities merged in iso back-to-front order ----
-      // Background
-      oct.fillStyle = '#1a2040'
+      // ---- Draw: sky gradient + clouds ----
+
+      // Sky gradient
+      const skyGrad = oct.createLinearGradient(0, 0, 0, ISO_OY + 8)
+      skyGrad.addColorStop(0, '#080618')
+      skyGrad.addColorStop(1, '#1a3060')
+      oct.fillStyle = skyGrad
       oct.fillRect(0, 0, LR_W, LR_H)
+
+      // Ground void below iso grid
+      oct.fillStyle = '#0e1830'
+      oct.fillRect(0, LR_H - 20, LR_W, 20)
+
+      // Drifting pixel clouds
+      for (const cloud of cloudsRef.current) {
+        cloud.x -= cloud.speed * dt
+        if (cloud.x < -40) cloud.x = LR_W + 20
+        const cx = Math.round(cloud.x)
+        const cy = Math.round(cloud.y)
+        oct.globalAlpha = 0.75
+        oct.fillStyle = '#d8e8f0'
+        oct.fillRect(cx,     cy + 2, 10, 3)
+        oct.fillRect(cx + 1, cy + 1,  4, 2)
+        oct.fillRect(cx + 5, cy,      4, 2)
+        oct.fillRect(cx + 3, cy,      3, 1)
+        oct.globalAlpha = 1
+      }
+
+      // ---- Draw: tiles + entities merged in iso back-to-front order ----
 
       // Build a combined sorted draw list: sort by col+row (ascending = back to front)
       // Tiles first, then entities, within the same depth band
@@ -621,14 +792,30 @@ export function Visualizer({
         return 0
       })
 
+      const tileIntro = tileIntroRef.current!
+
       for (const item of items) {
         if (item.kind === 'tile') {
           const [sx, sy] = isoSS(item.col, item.row)
-          const tile = tileMap[item.row * GRID_COLS + item.col]
+          const tileIdx  = item.row * GRID_COLS + item.col
+          const tile     = tileMap[tileIdx]
+
+          // Tile intro alpha
+          const tileBirth = tileIntro[tileIdx]
+          const tileAge   = now - tileBirth
+          const alpha     = tileAge <= 0
+            ? 0
+            : tileAge >= TILE_INTRO_DUR
+              ? 1
+              : easeInQuad(tileAge / TILE_INTRO_DUR)
+          oct.globalAlpha = alpha
+
           if      (tile === TILE_WATER)      drawWaterTile(oct, sx, sy, wavePhase)
           else if (tile === TILE_SAND)       drawSandTile(oct, sx, sy)
           else if (tile === TILE_DARK_GRASS) drawDarkGrassTile(oct, sx, sy)
           else                               drawGrassTile(oct, sx, sy)
+
+          oct.globalAlpha = 1
         } else {
           const e        = item.entity
           const [sx, sy] = isoSS(e.col, e.row)
@@ -639,6 +826,23 @@ export function Visualizer({
           else                            drawFlower(oct, sx, sy, s, e.variant)
         }
       }
+
+      // ---- Particles ----
+      const particles = particlesRef.current
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i]
+        p.x    += p.vx * dt
+        p.y    += p.vy * dt
+        p.life -= dt
+        if (p.life <= 0) {
+          particles.splice(i, 1)
+          continue
+        }
+        oct.globalAlpha = p.life / p.maxLife
+        oct.fillStyle   = `rgb(${p.r},${p.g},${p.b})`
+        oct.fillRect(Math.round(p.x), Math.round(p.y), 1, 1)
+      }
+      oct.globalAlpha = 1
 
       // ---- Scale-blit to display canvas ----
       ctx.fillStyle = '#000000'
