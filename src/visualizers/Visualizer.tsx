@@ -850,6 +850,34 @@ export function Visualizer({
       ctx.imageSmoothingEnabled = false
       ctx.drawImage(oc, drawX, drawY, drawW, drawH)
 
+      // ---- Corner UI messages (drawn at full resolution for crispness) ----
+      ctx.textBaseline = 'top'
+      const lrScale = drawH / LR_H
+      const uiFont = (size: number) => `${size}px "Courier New", monospace`
+      const drawLabel = (lines: string[], x: number, y: number, size: number, align: CanvasTextAlign) => {
+        ctx.font = uiFont(size)
+        ctx.textAlign = align
+        const lineH = size * 1.4
+        lines.forEach((line, i) => {
+          ctx.fillStyle = 'rgba(0,0,0,0.55)'
+          ctx.fillText(line, x + 1, y + i * lineH + 1)
+          ctx.fillStyle = '#f0e8c8'
+          ctx.fillText(line, x, y + i * lineH)
+        })
+      }
+      // Place text just below the cloud band (clouds top out at ~y=22 in low-res)
+      const topY = drawY + Math.round(32 * lrScale)
+      drawLabel(
+        ['Make noise to grow your landscape;', 'louder grows faster!'],
+        drawX + 14, topY, 15, 'left'
+      )
+      drawLabel(
+        ['Simulate noise if quiet', 'environment  \u2193'],
+        drawX + drawW - 14, topY, 13, 'right'
+      )
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'alphabetic'
+
       animFrameRef.current = requestAnimationFrame(draw)
     }
 
