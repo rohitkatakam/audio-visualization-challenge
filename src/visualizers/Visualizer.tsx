@@ -25,6 +25,7 @@ const ISO_OY = 14   // small top margin
 const GAIN         = 10.0
 const SILENCE_GATE = 0.012
 const STOP_GATE    = 0.06
+const VOLUME_SCALE = 4.0   // radius growth multiplier; gainedRms≈0.25 → ~1× spreadRate
 
 // Tile types
 const TILE_GRASS      = 0
@@ -364,6 +365,8 @@ type ActiveDevelopment = {
   type: DevelopmentType
 }
 
+const DEVELOPMENT_TYPES: DevelopmentType[] = ['trees', 'mountain', 'flowers', 'water_spread', 'dark_grove']
+
 const DEV_CFG: Record<DevelopmentType, { maxRadius: number; spreadRate: number }> = {
   mountain:     { maxRadius: 4,  spreadRate: 0.7 },
   trees:        { maxRadius: 7,  spreadRate: 1.4 },
@@ -394,7 +397,7 @@ export function Visualizer({
   const animFrameRef     = useRef(0)
   const wavePhaseRef     = useRef(0)
   const simulatingRef    = useRef(false)
-  const simPulseRef      = useRef({ speaking: false, timer: 0, rms: 0.35, bass: 0.3 })
+  const simPulseRef      = useRef({ speaking: false, timer: 0, rms: 0.35 })
   const [simulating, setSimulating] = useState(false)
 
   useEffect(() => {
@@ -449,7 +452,6 @@ export function Visualizer({
 
       // ---- Audio / simulation ----
       let gainedRms: number
-      let bassLevel: number
 
       if (simulatingRef.current) {
         const pulse = simPulseRef.current
@@ -460,19 +462,14 @@ export function Visualizer({
             const roll = Math.random()
             if (roll < 0.20) {
               pulse.rms  = 0.25 + Math.random() * 0.1
-              pulse.bass = 0.5  + Math.random() * 0.3
             } else if (roll < 0.40) {
               pulse.rms  = 0.65 + Math.random() * 0.3
-              pulse.bass = Math.random() * 0.3
             } else if (roll < 0.65) {
               pulse.rms  = 0.25 + Math.random() * 0.3
-              pulse.bass = Math.random() * 0.3
             } else if (roll < 0.85) {
               pulse.rms  = 0.09 + Math.random() * 0.15
-              pulse.bass = Math.random() * 0.3
             } else {
               pulse.rms  = 0.013 + Math.random() * 0.06
-              pulse.bass = Math.random() * 0.3
             }
             pulse.timer = 1.0 + Math.random() * 2.0
           } else {
@@ -480,7 +477,6 @@ export function Visualizer({
           }
         }
         gainedRms = pulse.speaking ? pulse.rms : 0
-        bassLevel = pulse.speaking ? pulse.bass : 0
       } else {
         const waveData = timeDomainData.current
         let sumSq = 0
@@ -489,10 +485,6 @@ export function Visualizer({
           sumSq += s * s
         }
         gainedRms = Math.min(Math.sqrt(sumSq / waveData.length) * GAIN, 1.0)
-        const freqData = frequencyData.current
-        let bassSum = 0
-        for (let i = 0; i < 20; i++) bassSum += freqData[i]
-        bassLevel = bassSum / (20 * 255)
       }
 
       const isSpeaking = wasSpeakingRef.current
@@ -501,12 +493,7 @@ export function Visualizer({
 
       // ---- Speech onset ----
       if (isSpeaking && !wasSpeakingRef.current) {
-        let type: DevelopmentType
-        if (bassLevel > 0.45)      type = 'water_spread'
-        else if (gainedRms > 0.6)  type = 'mountain'
-        else if (gainedRms > 0.25) type = 'trees'
-        else if (gainedRms > 0.08) type = 'dark_grove'
-        else                       type = 'flowers'
+        const type = DEVELOPMENT_TYPES[Math.floor(Math.random() * DEVELOPMENT_TYPES.length)]
 
         const cfg    = DEV_CFG[type]
         const margin = type === 'mountain' ? 2 : 1
@@ -528,7 +515,7 @@ export function Visualizer({
       const occupied = occupiedRef.current
 
       if (isSpeaking && dev !== null) {
-        dev.radius = Math.min(dev.radius + dev.spreadRate * dt, dev.maxRadius)
+        dev.radius = Math.min(dev.radius + dev.spreadRate * gainedRms * VOLUME_SCALE * dt, dev.maxRadius)
 
         for (let r = 0; r < GRID_ROWS; r++) {
           for (let c = 0; c < GRID_COLS; c++) {
@@ -541,20 +528,22 @@ export function Visualizer({
             const influence = Math.exp(-0.5 * (dist / sigma) ** 2)
             const idx       = r * GRID_COLS + c
 
-            if (dev.type === 'water_spread') {
-              if (tileMap[idx] !== TILE_WATER && !occupied.has(idx)) {
-                tileMap[idx] = TILE_WATER
-                // Sandy shoreline on adjacent empty grass tiles
-                const adj: [number, number][] = [[r-1,c],[r+1,c],[r,c-1],[r,c+1]]
-                for (const [nr, nc] of adj) {
-                  if (nr >= 0 && nr < GRID_ROWS && nc >= 0 && nc < GRID_COLS) {
-                    const nidx = nr * GRID_COLS + nc
-                    if (tileMap[nidx] === TILE_GRASS) tileMap[nidx] = TILE_SAND
+            if (Math.random() < influence * gainedRms * VOLUME_SCALE * dt) {
+              if (dev.type === 'water_spread') {
+                if (tileMap[idx] !== TILE_WATER && !occupied.has(idx)) {
+                  tileMap[idx] = TILE_WATER
+                  // Sandy shoreline on adjacent empty grass tiles
+                  const adj: [number, number][] = [[r-1,c],[r+1,c],[r,c-1],[r,c+1]]
+                  for (const [nr, nc] of adj) {
+                    if (nr >= 0 && nr < GRID_ROWS && nc >= 0 && nc < GRID_COLS) {
+                      const nidx = nr * GRID_COLS + nc
+                      if (tileMap[nidx] === TILE_GRASS) tileMap[nidx] = TILE_SAND
+                    }
                   }
                 }
+              } else if (dev.type === 'dark_grove' && tileMap[idx] === TILE_GRASS) {
+                tileMap[idx] = TILE_DARK_GRASS
               }
-            } else if (dev.type === 'dark_grove' && tileMap[idx] === TILE_GRASS) {
-              tileMap[idx] = TILE_DARK_GRASS
             }
 
             if (!occupied.has(idx) && Math.random() < influence * gainedRms * 3.0 * dt) {
